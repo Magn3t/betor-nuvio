@@ -1,0 +1,13 @@
+{
+  "name": "betor-nuvio",
+  "version": "1.0.0",
+  "description": "BeTor BR addon para Nuvio/Stremio",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "node-fetch": "^2.6.9"
+  }
+}
