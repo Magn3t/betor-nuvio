@@ -1,6 +1,6 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 
-const BETOR_URL = "https://betor.top/items.json";
+const BETOR_URL = "https://catalogo.betor.top/static/data/items.json";
 
 const manifest = {
   id: "community.betorbr.nuvio",
