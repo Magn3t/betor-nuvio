@@ -2,11 +2,11 @@ const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const https = require("https");
 
 const BETOR_URL = "https://catalogo.betor.top/static/data/items.json";
-const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 horas
+const CACHE_TTL = 6 * 60 * 60 * 1000;
 
 const manifest = {
   id: "community.betorbr.nuvio",
-  version: "1.0.3",
+  version: "1.0.4",
   name: "BeTor BR",
   description: "Filmes e séries dublados e legendados em Português (PT-BR) via BeTor",
   logo: "https://betor.top/favicon.ico",
@@ -17,13 +17,13 @@ const manifest = {
     {
       type: "movie",
       id: "betor_movies",
-      name: "🇧🇷 BeTor - Filmes",
+      name: "BeTor - Filmes",
       extra: [{ name: "search" }, { name: "skip" }]
     },
     {
       type: "series",
       id: "betor_series",
-      name: "🇧🇷 BeTor - Séries",
+      name: "BeTor - Series",
       extra: [{ name: "search" }, { name: "skip" }]
     }
   ]
@@ -31,7 +31,6 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// Índices compactos
 let movieIndex = null;
 let seriesIndex = null;
 let streamIndex = null;
@@ -79,7 +78,7 @@ function fetchJSON(url) {
       res.on("end", () => {
         try { resolve(JSON.parse(data)); }
         catch (e) { reject(e); }
-        data = null; // libera memória
+        data = null;
       });
     }).on("error", reject);
   });
@@ -93,20 +92,27 @@ async function buildIndexes() {
   try {
     console.log("Buscando dados do BeTor...");
     const data = await fetchJSON(BETOR_URL);
-    console.log(`${data.length} itens recebidos`);
+    console.log(data.length + " itens recebidos");
 
     const movies = {};
     const series = {};
     const streams = {};
-
-    // Agrupa todos os streams por imdb_id com score
     const rawStreams = {};
+    const itemTypes = {};
+
     for (const item of data) {
       if (!item.imdb_id || !item.magnet_uri) continue;
       const infoHash = extractInfoHash(item.magnet_uri);
       if (!infoHash) continue;
 
-      if (!rawStreams[item.imdb_id]) rawStreams[item.imdb_id] = [];
+      if (!rawStreams[item.imdb_id]) {
+        rawStreams[item.imdb_id] = [];
+        itemTypes[item.imdb_id] = {
+          type: item.item_type,
+          name: cleanName(item.torrent_name).substring(0, 50)
+        };
+      }
+
       rawStreams[item.imdb_id].push({
         h: infoHash,
         t: extractTrackers(item.magnet_uri),
@@ -116,26 +122,21 @@ async function buildIndexes() {
       });
     }
 
-    // Ordena por score e guarda só os top 5
-    for (const [imdbId, items] of Object.entries(rawStreams)) {
+    for (const imdbId of Object.keys(rawStreams)) {
+      const items = rawStreams[imdbId];
       streams[imdbId] = items
         .sort((a, b) => b.s - a.s)
         .slice(0, 5)
-        .map(({ h, t, n, p }) => ({ h, t, n, p }));
+        .map(function(i) { return { h: i.h, t: i.t, n: i.n, p: i.p }; });
 
-      // Catálogo: pega nome do melhor stream
-      const best = rawStreams[imdbId][0];
-      if (!best) continue;
-
-      const bestItem = data.find(i => i.imdb_id === imdbId);
-      if (bestItem?.item_type === "movie") {
-        movies[imdbId] = cleanName(bestItem.torrent_name).substring(0, 50);
-      } else if (bestItem?.item_type === "series") {
-        series[imdbId] = cleanName(bestItem.torrent_name).substring(0, 50);
+      const meta = itemTypes[imdbId];
+      if (meta && meta.type === "movie") {
+        movies[imdbId] = meta.name;
+      } else if (meta && meta.type === "series") {
+        series[imdbId] = meta.name;
       }
     }
 
-    // Limpa dados antigos antes de atualizar
     movieIndex = null;
     seriesIndex = null;
     streamIndex = null;
@@ -145,7 +146,7 @@ async function buildIndexes() {
     streamIndex = streams;
     lastFetch = now;
 
-    console.log(`Índices prontos: ${Object.keys(movies).length} filmes, ${Object.keys(series).length} séries`);
+    console.log("Indices prontos: " + Object.keys(movies).length + " filmes, " + Object.keys(series).length + " series");
   } catch (e) {
     console.error("Erro:", e.message);
   } finally {
@@ -153,46 +154,52 @@ async function buildIndexes() {
   }
 }
 
-builder.defineCatalogHandler(async ({ type, extra }) => {
+builder.defineCatalogHandler(async function(args) {
   await buildIndexes();
   if (!movieIndex) return { metas: [] };
 
-  const skip = parseInt(extra?.skip || 0);
-  const search = extra?.search?.toLowerCase();
+  const type = args.type;
+  const extra = args.extra || {};
+  const skip = parseInt(extra.skip || 0);
+  const search = extra.search ? extra.search.toLowerCase() : null;
   const index = type === "movie" ? movieIndex : seriesIndex;
 
   let entries = Object.entries(index);
 
   if (search) {
-    entries = entries.filter(([, name]) => name.toLowerCase().includes(search));
+    entries = entries.filter(function(e) { return e[1].toLowerCase().includes(search); });
   }
 
-  const metas = entries.slice(skip, skip + 20).map(([imdbId, name]) => ({
-    id: imdbId,
-    type,
-    name: name || imdbId,
-    poster: `https://images.metahub.space/poster/medium/${imdbId}/img`
-  }));
+  const metas = entries.slice(skip, skip + 20).map(function(e) {
+    return {
+      id: e[0],
+      type: type,
+      name: e[1] || e[0],
+      poster: "https://images.metahub.space/poster/medium/" + e[0] + "/img"
+    };
+  });
 
-  return { metas };
+  return { metas: metas };
 });
 
-builder.defineStreamHandler(async ({ id }) => {
+builder.defineStreamHandler(async function(args) {
   await buildIndexes();
   if (!streamIndex) return { streams: [] };
 
-  const items = streamIndex[id] || [];
+  const items = streamIndex[args.id] || [];
 
-  const streams = items.map(item => ({
-    name: `🇧🇷 BeTor BR`,
-    title: `${item.n}\n📡 ${item.p}`,
-    infoHash: item.h,
-    sources: item.t
-  }));
+  const streams = items.map(function(item) {
+    return {
+      name: "BeTor BR",
+      title: item.n + "\n" + item.p,
+      infoHash: item.h,
+      sources: item.t
+    };
+  });
 
-  return { streams };
+  return { streams: streams };
 });
 
 const port = process.env.PORT || 3000;
 serveHTTP(builder.getInterface(), { port });
-console.log(`BeTor BR addon rodando na porta ${port}`);
+console.log("BeTor BR addon rodando na porta " + port);
