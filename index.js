@@ -50,6 +50,22 @@ function extractTrackers(magnetUri) {
   return matches.slice(0, 5).map(t => decodeURIComponent(t.replace("tr=", "")));
 }
 
+function getQualityScore(torrentName) {
+  if (!torrentName) return 0;
+  const name = torrentName.toLowerCase();
+  if (name.includes("2160p") || name.includes("4k") || name.includes("uhd")) return 4000;
+  if (name.includes("1080p")) return 3000;
+  if (name.includes("720p")) return 2000;
+  if (name.includes("480p")) return 1000;
+  return 500;
+}
+
+function scoreStream(item) {
+  const quality = getQualityScore(item.torrent_name);
+  const seeds = parseInt(item.seeds || item.seeders || 0);
+  return quality + seeds;
+}
+
 function cleanName(torrentName) {
   if (!torrentName) return "";
   return torrentName.replace(/\.(19|20)\d{2}.*$/i, "").replace(/\./g, " ").trim();
@@ -83,27 +99,39 @@ async function buildIndexes() {
     const series = {};
     const streams = {};
 
+    // Agrupa todos os streams por imdb_id com score
+    const rawStreams = {};
     for (const item of data) {
       if (!item.imdb_id || !item.magnet_uri) continue;
       const infoHash = extractInfoHash(item.magnet_uri);
       if (!infoHash) continue;
 
-      // Streams: só guarda o essencial
-      if (!streams[item.imdb_id]) streams[item.imdb_id] = [];
-      if (streams[item.imdb_id].length < 5) { // máximo 5 streams por título
-        streams[item.imdb_id].push({
-          h: infoHash,
-          t: extractTrackers(item.magnet_uri),
-          n: (item.torrent_name || "").substring(0, 60),
-          p: (item.provider_slug || "").substring(0, 20)
-        });
-      }
+      if (!rawStreams[item.imdb_id]) rawStreams[item.imdb_id] = [];
+      rawStreams[item.imdb_id].push({
+        h: infoHash,
+        t: extractTrackers(item.magnet_uri),
+        n: (item.torrent_name || "").substring(0, 60),
+        p: (item.provider_slug || "").substring(0, 20),
+        s: scoreStream(item)
+      });
+    }
 
-      // Catálogo: só um por imdb_id
-      if (item.item_type === "movie" && !movies[item.imdb_id]) {
-        movies[item.imdb_id] = cleanName(item.torrent_name).substring(0, 50);
-      } else if (item.item_type === "series" && !series[item.imdb_id]) {
-        series[item.imdb_id] = cleanName(item.torrent_name).substring(0, 50);
+    // Ordena por score e guarda só os top 5
+    for (const [imdbId, items] of Object.entries(rawStreams)) {
+      streams[imdbId] = items
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 5)
+        .map(({ h, t, n, p }) => ({ h, t, n, p }));
+
+      // Catálogo: pega nome do melhor stream
+      const best = rawStreams[imdbId][0];
+      if (!best) continue;
+
+      const bestItem = data.find(i => i.imdb_id === imdbId);
+      if (bestItem?.item_type === "movie") {
+        movies[imdbId] = cleanName(bestItem.torrent_name).substring(0, 50);
+      } else if (bestItem?.item_type === "series") {
+        series[imdbId] = cleanName(bestItem.torrent_name).substring(0, 50);
       }
     }
 
