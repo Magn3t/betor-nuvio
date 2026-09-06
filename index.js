@@ -1,10 +1,12 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
+const https = require("https");
 
 const BETOR_URL = "https://catalogo.betor.top/static/data/items.json";
+const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 horas
 
 const manifest = {
   id: "community.betorbr.nuvio",
-  version: "1.0.1",
+  version: "1.0.3",
   name: "BeTor BR",
   description: "Filmes e séries dublados e legendados em Português (PT-BR) via BeTor",
   logo: "https://betor.top/favicon.ico",
@@ -29,25 +31,12 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-let cachedData = null;
+// Índices compactos
+let movieIndex = null;
+let seriesIndex = null;
+let streamIndex = null;
 let lastFetch = 0;
-
-async function fetchBetorData() {
-  const now = Date.now();
-  if (cachedData && now - lastFetch < 3600000) return cachedData;
-  
-  try {
-    const fetch = require("node-fetch");
-    const res = await fetch(BETOR_URL);
-    cachedData = await res.json();
-    lastFetch = now;
-    console.log(`BeTor: ${cachedData.length} itens carregados`);
-    return cachedData;
-  } catch (e) {
-    console.error("Erro ao buscar dados do BeTor:", e);
-    return cachedData || [];
-  }
-}
+let isFetching = false;
 
 function extractInfoHash(magnetUri) {
   if (!magnetUri) return null;
@@ -58,59 +47,120 @@ function extractInfoHash(magnetUri) {
 function extractTrackers(magnetUri) {
   if (!magnetUri) return [];
   const matches = magnetUri.match(/tr=([^&]+)/g) || [];
-  return matches.map(t => decodeURIComponent(t.replace("tr=", "")));
+  return matches.slice(0, 5).map(t => decodeURIComponent(t.replace("tr=", "")));
 }
 
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  const data = await fetchBetorData();
+function cleanName(torrentName) {
+  if (!torrentName) return "";
+  return torrentName.replace(/\.(19|20)\d{2}.*$/i, "").replace(/\./g, " ").trim();
+}
+
+function fetchJSON(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = "";
+      res.on("data", chunk => { data += chunk; });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+        data = null; // libera memória
+      });
+    }).on("error", reject);
+  });
+}
+
+async function buildIndexes() {
+  const now = Date.now();
+  if ((movieIndex && now - lastFetch < CACHE_TTL) || isFetching) return;
+
+  isFetching = true;
+  try {
+    console.log("Buscando dados do BeTor...");
+    const data = await fetchJSON(BETOR_URL);
+    console.log(`${data.length} itens recebidos`);
+
+    const movies = {};
+    const series = {};
+    const streams = {};
+
+    for (const item of data) {
+      if (!item.imdb_id || !item.magnet_uri) continue;
+      const infoHash = extractInfoHash(item.magnet_uri);
+      if (!infoHash) continue;
+
+      // Streams: só guarda o essencial
+      if (!streams[item.imdb_id]) streams[item.imdb_id] = [];
+      if (streams[item.imdb_id].length < 5) { // máximo 5 streams por título
+        streams[item.imdb_id].push({
+          h: infoHash,
+          t: extractTrackers(item.magnet_uri),
+          n: (item.torrent_name || "").substring(0, 60),
+          p: (item.provider_slug || "").substring(0, 20)
+        });
+      }
+
+      // Catálogo: só um por imdb_id
+      if (item.item_type === "movie" && !movies[item.imdb_id]) {
+        movies[item.imdb_id] = cleanName(item.torrent_name).substring(0, 50);
+      } else if (item.item_type === "series" && !series[item.imdb_id]) {
+        series[item.imdb_id] = cleanName(item.torrent_name).substring(0, 50);
+      }
+    }
+
+    // Limpa dados antigos antes de atualizar
+    movieIndex = null;
+    seriesIndex = null;
+    streamIndex = null;
+
+    movieIndex = movies;
+    seriesIndex = series;
+    streamIndex = streams;
+    lastFetch = now;
+
+    console.log(`Índices prontos: ${Object.keys(movies).length} filmes, ${Object.keys(series).length} séries`);
+  } catch (e) {
+    console.error("Erro:", e.message);
+  } finally {
+    isFetching = false;
+  }
+}
+
+builder.defineCatalogHandler(async ({ type, extra }) => {
+  await buildIndexes();
+  if (!movieIndex) return { metas: [] };
+
   const skip = parseInt(extra?.skip || 0);
   const search = extra?.search?.toLowerCase();
+  const index = type === "movie" ? movieIndex : seriesIndex;
 
-  // Agrupar por imdb_id para não duplicar
-  const seen = new Set();
-  let items = data.filter(item => {
-    if (!item.imdb_id) return false;
-    if (seen.has(item.imdb_id)) return false;
-    seen.add(item.imdb_id);
-    
-    if (type === "movie") return item.item_type === "movie";
-    if (type === "series") return item.item_type === "series";
-    return false;
-  });
+  let entries = Object.entries(index);
 
   if (search) {
-    items = items.filter(item =>
-      item.torrent_name?.toLowerCase().includes(search)
-    );
+    entries = entries.filter(([, name]) => name.toLowerCase().includes(search));
   }
 
-  const metas = items.slice(skip, skip + 20).map(item => ({
-    id: item.imdb_id,
-    type: type,
-    name: item.torrent_name?.replace(/\.\d{4}.*/, "") || item.imdb_id,
-    poster: `https://images.metahub.space/poster/medium/${item.imdb_id}/img`
-  })).filter(m => m.id);
+  const metas = entries.slice(skip, skip + 20).map(([imdbId, name]) => ({
+    id: imdbId,
+    type,
+    name: name || imdbId,
+    poster: `https://images.metahub.space/poster/medium/${imdbId}/img`
+  }));
 
   return { metas };
 });
 
-builder.defineStreamHandler(async ({ type, id }) => {
-  const data = await fetchBetorData();
-  
-  const items = data.filter(i => i.imdb_id === id && i.magnet_uri);
-  if (!items.length) return { streams: [] };
+builder.defineStreamHandler(async ({ id }) => {
+  await buildIndexes();
+  if (!streamIndex) return { streams: [] };
 
-  const streams = items.map(item => {
-    const infoHash = extractInfoHash(item.magnet_uri);
-    if (!infoHash) return null;
-    
-    return {
-      name: `🇧🇷 BeTor BR`,
-      title: `${item.torrent_name || ""}\n📡 ${item.provider_slug || ""}`,
-      infoHash: infoHash,
-      sources: extractTrackers(item.magnet_uri)
-    };
-  }).filter(Boolean);
+  const items = streamIndex[id] || [];
+
+  const streams = items.map(item => ({
+    name: `🇧🇷 BeTor BR`,
+    title: `${item.n}\n📡 ${item.p}`,
+    infoHash: item.h,
+    sources: item.t
+  }));
 
   return { streams };
 });
