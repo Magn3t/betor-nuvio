@@ -6,9 +6,9 @@ const CACHE_TTL = 6 * 60 * 60 * 1000;
 
 const manifest = {
   id: "community.betorbr.nuvio",
-  version: "1.0.4",
+  version: "1.0.5",
   name: "BeTor BR",
-  description: "Filmes e séries dublados e legendados em Português (PT-BR) via BeTor",
+  description: "Filmes e series dublados e legendados em Portugues (PT-BR) via BeTor",
   logo: "https://betor.top/favicon.ico",
   resources: ["stream", "catalog"],
   types: ["movie", "series"],
@@ -67,7 +67,20 @@ function scoreStream(item) {
 
 function cleanName(torrentName) {
   if (!torrentName) return "";
-  return torrentName.replace(/\.(19|20)\d{2}.*$/i, "").replace(/\./g, " ").trim();
+  // Remove qualidade, codec, fonte e resto
+  let name = torrentName
+    .replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdr|sdr|bluray|blu-ray|webrip|web-dl|webdl|hdtv|dvdrip|bdrip|hdrip|x264|x265|h264|h265|hevc|avc|xvid|divx|aac|ac3|dts|mp3|atmos|truehd|ddp|dd5|remux|proper|repack|extended|theatrical|directors|cut|unrated|dual|dublado|legendado|nacional|portugues|brazil|br|pt)\b.*$/i, "")
+    // Remove SxxExx e resto pra series
+    .replace(/\bS\d{2}E\d{2}\b.*/i, "")
+    // Remove ano e resto
+    .replace(/\b(19|20)\d{2}\b.*/i, "")
+    // Substitui pontos e underscores por espaco
+    .replace(/[._]/g, " ")
+    // Remove espacos duplos
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return name.substring(0, 50);
 }
 
 function fetchJSON(url) {
@@ -109,14 +122,14 @@ async function buildIndexes() {
         rawStreams[item.imdb_id] = [];
         itemTypes[item.imdb_id] = {
           type: item.item_type,
-          name: cleanName(item.torrent_name).substring(0, 50)
+          name: cleanName(item.torrent_name)
         };
       }
 
       rawStreams[item.imdb_id].push({
         h: infoHash,
         t: extractTrackers(item.magnet_uri),
-        n: (item.torrent_name || "").substring(0, 60),
+        n: (item.torrent_name || "").substring(0, 80),
         p: (item.provider_slug || "").substring(0, 20),
         s: scoreStream(item)
       });
@@ -127,7 +140,7 @@ async function buildIndexes() {
       streams[imdbId] = items
         .sort((a, b) => b.s - a.s)
         .slice(0, 5)
-        .map(function(i) { return { h: i.h, t: i.t, n: i.n, p: i.p }; });
+        .map(i => ({ h: i.h, t: i.t, n: i.n, p: i.p }));
 
       const meta = itemTypes[imdbId];
       if (meta && meta.type === "movie") {
@@ -167,19 +180,17 @@ builder.defineCatalogHandler(async function(args) {
   let entries = Object.entries(index);
 
   if (search) {
-    entries = entries.filter(function(e) { return e[1].toLowerCase().includes(search); });
+    entries = entries.filter(e => e[1].toLowerCase().includes(search));
   }
 
-  const metas = entries.slice(skip, skip + 20).map(function(e) {
-    return {
-      id: e[0],
-      type: type,
-      name: e[1] || e[0],
-      poster: "https://images.metahub.space/poster/medium/" + e[0] + "/img"
-    };
-  });
+  const metas = entries.slice(skip, skip + 20).map(e => ({
+    id: e[0],
+    type: type,
+    name: e[1] || e[0],
+    poster: "https://images.metahub.space/poster/medium/" + e[0] + "/img"
+  }));
 
-  return { metas: metas };
+  return { metas };
 });
 
 builder.defineStreamHandler(async function(args) {
@@ -188,16 +199,14 @@ builder.defineStreamHandler(async function(args) {
 
   const items = streamIndex[args.id] || [];
 
-  const streams = items.map(function(item) {
-    return {
-      name: "BeTor BR",
-      title: item.n + "\n" + item.p,
-      infoHash: item.h,
-      sources: item.t
-    };
-  });
+  const streams = items.map(item => ({
+    name: "BeTor BR",
+    title: item.n + "\n" + item.p,
+    infoHash: item.h,
+    sources: item.t
+  }));
 
-  return { streams: streams };
+  return { streams };
 });
 
 const port = process.env.PORT || 3000;
